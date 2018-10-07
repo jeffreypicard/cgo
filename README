@@ -1,0 +1,2 @@
+CGO is an attempt at implementing some of the most useful features of Golang
+in a C library, namely channels and go rountines.
