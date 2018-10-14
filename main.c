@@ -4,6 +4,8 @@
  * Author: Jeffrey Picard
  */
 
+#define _DEFAULT_SOURCE
+
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -12,12 +14,15 @@
 #include <pthread.h>
 
 #include <unistd.h>
+#include <time.h>
+//#include <sys/time.h>
+
 
 struct channel {
-	int 		cap;
-	int 		siz;
-	int 		in_idx;
-	int 		out_idx;
+	uint32_t	cap;
+	uint32_t	siz;
+	uint32_t	in_idx;
+	uint32_t	out_idx;
 	pthread_mutex_t mut;
 	void 		**data;
 };
@@ -29,8 +34,9 @@ struct c_routine {
 	int 		num_args;
 };
 
-// This is the assembly function
+// Assembly function
 void *cgo_asm(void *);
+int atomic_insert(void **old_val, void *new_val);
 
 void
 free_c_routine(struct c_routine *c)
@@ -106,7 +112,7 @@ channel_resize(struct channel *c)
 struct channel *
 channel_make()
 {
-	int N = 2;
+	int N = 512;
 	struct channel *c = calloc(1, sizeof *c);
 
 	if (!c) return NULL;
@@ -154,20 +160,34 @@ channel_unlock(struct channel *c)
 int
 channel_add(struct channel *c, void *d)
 {
-	if (channel_lock(c) != 0) return 1;
+	struct timespec rmtp;
+	rmtp.tv_sec = 0;
+	rmtp.tv_nsec = 1000;
+
+	while (channel_lock(c) != 0) {sleep(1);}
 
 	if (c->siz - 1 >= c->cap) {
 		if (!channel_resize(c)) return 1;
 	}
 
-	c->data[c->in_idx % c->cap] = d;
+	int i = c->in_idx % c->cap;
+	c->data[i] = d;
+	/*
+	while(!atomic_insert(&c->data[i], d)) {
+		nanosleep(&rmtp, NULL);
+	}
+	while(!atomic_insert(&c->data[i], d)){}
+	*/	
+
+
 	c->siz++;
+	c->in_idx++;
 
 	if (channel_unlock(c) != 0) {
-		c->siz--;
+		//c->siz--;
+		//Should never happen?
 		return 1;
 	}
-	c->in_idx++;
 
 	return 0;
 }
@@ -188,7 +208,7 @@ channel_get(struct channel *c)
 	 */
 	while (c->siz == 0) {
 		channel_unlock(c);
-		sleep(1); // Tune this FIXME
+		//sleep(1); // Tune this FIXME
 		channel_lock(c);
 	}
 
@@ -205,16 +225,16 @@ channel_get(struct channel *c)
 }
 
 int
-par_sum(int *x, int n, struct channel *c)
+par_sum(uint64_t *x, uint64_t n, struct channel *c)
 {
-	int i;
-	int sum;
+	uint64_t i;
+	uint64_t sum;
 
 	sum = 0;
 	for (i = 0; i < n; i++) {
 		sum += x[i];
 	}
-	channel_add(c, (void *) (long) sum);
+	channel_add(c, (void *) sum);
 
 	return 0;
 }
@@ -226,38 +246,79 @@ ret_n(int n)
 }
 
 int
-main(int argc, char **argv)
+tests()
 {
-	(void) argc;
-	(void) argv;
-
-	int N = 1024;
-	int n1, n2;
-	int *x1, *x2;
-	int i;
-	int part1, part2;
+	long N = 2 << 10;
+	long n1, n2;
+	long *x, *x1, *x2;
+	long i, j, k;
+	//int part1, part2;
 	struct channel *c;
+	struct timespec beg, end;
+	int splits = 4;
+	uint64_t sum = 0, real_sum = 0;
 
-	x1 = calloc(N, sizeof *x1);
+	srandom(time(NULL));
+	x = calloc(N, sizeof *x1);
 
 	for (i = 0; i < N; i++) {
-		x1[i] = i;
+		x[i] = random() % 100;
+		real_sum += x[i];
 	}
 
-	c = channel_make();
-	n1 = 300;
-	n2 = N - 300;
-	x2 = x1 + 300;
+	/*
+	long r = random() % N;
+	n1 = r;
+	n2 = N - r;
+	x2 = x1 + r;
 
 	struct c_routine *crt;
 	struct c_routine *crt2;
-	crt = cgo(3, par_sum, x1, n1, c);
-	crt2 = cgo(3, par_sum, x2, n2, c);
+
+	cgo(3, par_sum, x1, n1, c);
+	cgo(3, par_sum, x2, n2, c);
+	*/
+
+	int part_siz = N / splits;
+
+	c = channel_make();
+
+	clock_gettime(CLOCK_REALTIME, &beg);
 
 
-	part1 = (int) (long) channel_get(c);
-	part2 = (int) (long) channel_get(c);
+	i = 0;
+	j = 0;
+	while (i < N) {
+		j++;
+		cgo(3, par_sum, x, part_siz, c);
 
+		i += part_siz;
+		x += part_siz;
+
+		if (i + part_siz > N) {
+			part_siz = N - i;
+		}
+	}
+
+	i = 0;
+	uint64_t int_sum;
+	while (i < j) {
+		i++;
+		int_sum = (long) channel_get(c);
+		sum += int_sum;
+	}
+
+	clock_gettime(CLOCK_REALTIME, &end);
+
+
+	fprintf(stderr,
+		"N: %ld, real_sum: %ld, sum: %ld, time: %ld / %ld\n",
+		N, real_sum, sum,
+		end.tv_sec - beg.tv_sec,
+		end.tv_nsec - beg.tv_nsec);
+
+	/*
+	 * Don't need this for testing the OS just reclaims it anyways
 	void *res, *res2;
 	pthread_join(crt->t, &res);
 	pthread_join(crt2->t, &res2);
@@ -270,6 +331,18 @@ main(int argc, char **argv)
 	free_c_routine(crt2);
 
 	fprintf(stderr, "%d, %d, %d\n", part1, part2, part1 + part2);
+	*/
+
+	return 0;
+}
+
+int
+main(int argc, char **argv)
+{
+	(void) argc;
+	(void) argv;
+
+	tests();
 
 	return 0;
 }
