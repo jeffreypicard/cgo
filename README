@@ -1,2 +1,4 @@
 CGO is an attempt at implementing some of the most useful features of Golang
 in a C library, namely channels and go rountines.
+
+N.B. only tested on linux (ubuntu) doesn't work on mac.
