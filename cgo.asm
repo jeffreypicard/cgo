@@ -12,11 +12,13 @@ section .text
 cgo_asm:
   push    rbp
   mov     rbp,rsp
-  sub     rsp,32           ;Allocate space for local variables (8 bytes each)
+  sub     rsp,48           ;Allocate space for local variables (8 bytes each)
   mov     [rbp-24],rbx     ;We're responsible for restoring this value
-  mov     r10,rdi          ;move the arg pointer becasuse rdi is needed
-  mov     rbx,[r10]        ;How many params
-  mov     r11,[r10+8]      ;Function addr
+  mov     [rbp-32],r12     ;We're responsible for restoring this value
+  mov     [rbp-40],r13     ;We're responsible for restoring this value
+  mov     r12,rdi          ;move the arg pointer becasuse rdi is needed
+  mov     rbx,[r12]        ;How many params
+  mov     r13,[r12+8]      ;Function addr
   xor     rax,rax
 
 loop:
@@ -42,22 +44,22 @@ loop:
   je      six
 
 one:
-  mov     rdi,[r10+16]
+  mov     rdi,[r12+16]
   jmp     next
 two:
-  mov     rsi,[r10+24]
+  mov     rsi,[r12+24]
   jmp     next
 three:
-  mov     rdx,[r10+32]
+  mov     rdx,[r12+32]
   jmp     next
 four:
-  mov     rcx,[r10+40]
+  mov     rcx,[r12+40]
   jmp     next
 five:
-  mov     r8,[r10+48]
+  mov     r8,[r12+48]
   jmp     next
 six:
-  mov     r9,[r10+56]
+  mov     r9,[r12+56]
 ;more: FIXME: Implement more than 6 args
 
 next:
@@ -66,8 +68,11 @@ next:
 
 go:
 
-  call    r11
+  call    r13
   mov     rbx,[rbp-24]
-  add     rsp,32
+  mov     r12,[rbp-32]
+  mov     r13,[rbp-42]
+  add     rsp,48
+  xor     rax,rax
   pop     rbp
   ret

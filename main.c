@@ -16,6 +16,7 @@
 #include <unistd.h>
 #include <time.h>
 //#include <sys/time.h>
+//ret = pthread_cond_init(&cv, NULL);
 
 
 struct channel {
@@ -24,6 +25,7 @@ struct channel {
 	uint32_t	in_idx;
 	uint32_t	out_idx;
 	pthread_mutex_t mut;
+	pthread_cond_t  cv;
 	void 		**data;
 };
 
@@ -37,13 +39,29 @@ struct c_routine {
 // Assembly function
 void *cgo_asm(void *);
 //int atomic_insert(void **old_val, void *new_val);
-int atomic_increment(uint32_t *ptr, uint32_t old_val, uint32_t new_val);
+int atomic_increment(void **ptr, void *old_val, void *new_val);
+
+void timespec_diff(struct timespec *result, struct timespec *stop,
+                   struct timespec *start)
+{
+    if ((stop->tv_nsec - start->tv_nsec) < 0) {
+        result->tv_sec = stop->tv_sec - start->tv_sec - 1;
+        result->tv_nsec = stop->tv_nsec - start->tv_nsec + 1000000000;
+    } else {
+        result->tv_sec = stop->tv_sec - start->tv_sec;
+        result->tv_nsec = stop->tv_nsec - start->tv_nsec;
+    }
+
+    return;
+}
 
 void
 free_c_routine(struct c_routine *c)
 {
-	//pthread_cancel(c->t);
-	free(c->args);
+	if (!c) return;
+	pthread_cancel(c->t);
+	if (c->args)
+		free(c->args);
 	free(c);
 }
 
@@ -57,8 +75,8 @@ cgo(int num_args, ...)
 	uint64_t *args;
 	void *arg;
 
-	//num_args_to_func = num_args + 2;
-	num_args_to_func = num_args + 4;
+	num_args_to_func = num_args + 2;
+	//num_args_to_func = num_args + 4;
 	args = calloc(num_args_to_func, sizeof *args);
 
 	if (!args) return NULL;
@@ -70,7 +88,7 @@ cgo(int num_args, ...)
 		return NULL;
 	}
 
-	args[0] = num_args_to_func;
+	args[0] = num_args;
 	va_start(ap, num_args);
 	for(i = 1; i < num_args_to_func; i++) {
 		arg = va_arg(ap, void *);
@@ -78,7 +96,7 @@ cgo(int num_args, ...)
 	}
 	va_end(ap);
 
-	c_rout->func = (void * (*)(void *)) args[0];
+	c_rout->func = (void * (*)(void *)) args[num_args_to_func-1];
 	c_rout->args = args;
 	c_rout->num_args = num_args_to_func;
 
@@ -125,6 +143,7 @@ channel_make()
 	if (!c->data) return NULL;
 
 	pthread_mutex_init(&c->mut, 0);
+	pthread_cond_init(&c->cv, NULL);
 
 	return c;
 }
@@ -140,8 +159,6 @@ channel_destroy(struct channel *c)
 }
 
 /*
- * FIXME
- * very inefficient
  */
 int
 channel_lock(struct channel *c)
@@ -151,8 +168,6 @@ channel_lock(struct channel *c)
 }
 
 /*
- * FIXME
- * very inefficient
  */
 int
 channel_unlock(struct channel *c)
@@ -161,12 +176,18 @@ channel_unlock(struct channel *c)
 	return 0;
 }
 
+void
+channel_wait(struct channel *c)
+{
+	pthread_cond_wait(&c->cv, &c->mut);
+}
+
 int
 channel_add(struct channel *c, void *d)
 {
-	struct timespec rmtp;
-	rmtp.tv_sec = 0;
-	rmtp.tv_nsec = 1000;
+	//struct timespec rmtp;
+	//rmtp.tv_sec = 0;
+	//rmtp.tv_nsec = 1000;
 
 	while (channel_lock(c) != 0) {sleep(1);}
 
@@ -187,11 +208,15 @@ channel_add(struct channel *c, void *d)
 	c->siz++;
 	c->in_idx++;
 
+
 	if (channel_unlock(c) != 0) {
 		//c->siz--;
 		//Should never happen?
+		pthread_cond_signal(&c->cv);
 		return 1;
 	}
+
+	pthread_cond_signal(&c->cv);
 
 	return 0;
 }
@@ -199,14 +224,17 @@ channel_add(struct channel *c, void *d)
 int
 channel_add_2(struct channel *c, void *d)
 {
-	int i, idx, res;
+	uint64_t i, idx, res;
 	struct timespec rmtp;
 	rmtp.tv_sec = 0;
 	rmtp.tv_nsec = 1000;
 
 
 	if (c->siz - 1 >= c->cap) {
-		while (channel_lock(c) != 0) {sleep(1);}
+		while (channel_lock(c) != 0) {
+			printf("locking");
+			sleep(1);
+		}
 		if (!channel_resize(c)) return 1;
 		if (channel_unlock(c) != 0) {
 			//c->siz--;
@@ -217,12 +245,14 @@ channel_add_2(struct channel *c, void *d)
 
 	//c->data[i] = d;
 	do {
+		fprintf(stderr, "before: %d\n", c->in_idx);
 		idx = c->in_idx;
 		i = idx % c->cap;
-		//nanosleep(&rmtp, NULL);
-		res = atomic_increment(&(c->in_idx), idx, idx + 1);
+		res = atomic_increment((void *)&(c->in_idx), (void *)idx, (void *)(idx + 1));
+		fprintf(stderr, "after: %d\n", c->in_idx);
 		//c->in_idx++;
-	} while (!res);
+		if (res != 0) nanosleep(&rmtp, NULL);
+	} while (res != 0);
 	c->siz++;
 	c->data[i] = d;
 
@@ -239,14 +269,12 @@ channel_get(struct channel *c)
 	if (!c) return NULL;
 
 	/*
-	 * FIXME
-	 * Probably very inefficient, but something like this is needed
-	 * for a channel read to block until there's a message ready
 	 */
 	while (c->siz == 0) {
-		channel_unlock(c);
+		//channel_unlock(c);
 		//sleep(1); // Tune this FIXME
-		channel_lock(c);
+		//channel_lock(c);
+		channel_wait(c);
 	}
 
 	res = c->data[c->out_idx % c->cap];
@@ -271,8 +299,8 @@ par_sum(uint64_t *x, uint64_t n, struct channel *c)
 	for (i = 0; i < n; i++) {
 		sum += x[i];
 	}
-	//channel_add(c, (void *) sum);
-	channel_add_2(c, (void *) sum);
+	channel_add(c, (void *) sum);
+	//channel_add_2(c, (void *) sum);
 
 	return 0;
 }
@@ -284,20 +312,53 @@ ret_n(int n)
 }
 
 int
-tests()
+add_to_channel(uint64_t n, struct channel *c)
 {
-	long N = 2 << 10;
-	long n1, n2;
-	long *x, *x1, *x2;
-	long i, j, k;
+	uint64_t i;
+
+	for (i = 0; i < n; i++) {
+		channel_add(c, (void *) i);
+	}
+	//channel_add_2(c, (void *) sum);
+
+	return 0;
+}
+
+int
+test2()
+{
+	struct channel *c;
+	c = channel_make();
+	struct c_routine *r = cgo(2, add_to_channel, 100, c);
+
+	for(int i = 0; i < 100; i++) {
+		long x = (long) channel_get(c);
+		if (x % 10 == 0) {
+			fprintf(stderr, "%ld\n", x);
+		}
+	}
+
+	free_c_routine(r);
+	channel_destroy(c);
+
+	return 0;
+}
+
+int
+tests(int splits)
+{
+	long long N = 1 << 5;
+	long long *x, *x1;
+	long long i, j;
 	//int part1, part2;
 	struct channel *c;
-	struct timespec beg, end;
-	int splits = 4;
+	struct timespec beg, end, diff;
+	//int splits = 8;
 	uint64_t sum = 0, real_sum = 0;
 
 	srandom(time(NULL));
 	x = calloc(N, sizeof *x1);
+	x1 = x;
 
 	for (i = 0; i < N; i++) {
 		x[i] = random() % 100;
@@ -326,9 +387,11 @@ tests()
 
 	i = 0;
 	j = 0;
+	struct c_routine **rs;
+	rs = calloc(splits + 1, sizeof(*rs));
 	while (i < N) {
 		j++;
-		cgo(3, par_sum, x, part_siz, c);
+		rs[j] = cgo(3, par_sum, x, part_siz, c);
 
 		i += part_siz;
 		x += part_siz;
@@ -348,13 +411,22 @@ tests()
 
 	clock_gettime(CLOCK_REALTIME, &end);
 
+	
+	timespec_diff(&diff, &end, &beg);
+
 
 	fprintf(stderr,
-		"N: %ld, real_sum: %ld, sum: %ld, time: %ld / %ld\n",
+		"N: %lld, real_sum: %ld, sum: %ld, time: %ld / %ld\n",
 		N, real_sum, sum,
-		end.tv_sec - beg.tv_sec,
-		end.tv_nsec - beg.tv_nsec);
+		diff.tv_sec,
+		diff.tv_nsec);
 
+	for (i = 0; i <= j; i++) {
+		free_c_routine(rs[i]);
+	}
+	free(rs);
+	free(x1);
+	channel_destroy(c);
 	/*
 	 * Don't need this for testing the OS just reclaims it anyways
 	void *res, *res2;
@@ -377,10 +449,13 @@ tests()
 int
 main(int argc, char **argv)
 {
-	(void) argc;
-	(void) argv;
+    	int splits = 4;
+	if (argc > 1) {
+		splits = atoi(argv[1]);
+    	}
 
-	tests();
+	tests(splits);
+	test2();
 
 	return 0;
 }
