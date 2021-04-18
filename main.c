@@ -36,7 +36,8 @@ struct c_routine {
 
 // Assembly function
 void *cgo_asm(void *);
-int atomic_insert(void **old_val, void *new_val);
+//int atomic_insert(void **old_val, void *new_val);
+int atomic_increment(uint32_t *ptr, uint32_t old_val, uint32_t new_val);
 
 void
 free_c_routine(struct c_routine *c)
@@ -56,7 +57,8 @@ cgo(int num_args, ...)
 	uint64_t *args;
 	void *arg;
 
-	num_args_to_func = num_args + 2;
+	//num_args_to_func = num_args + 2;
+	num_args_to_func = num_args + 4;
 	args = calloc(num_args_to_func, sizeof *args);
 
 	if (!args) return NULL;
@@ -139,6 +141,7 @@ channel_destroy(struct channel *c)
 
 /*
  * FIXME
+ * very inefficient
  */
 int
 channel_lock(struct channel *c)
@@ -149,6 +152,7 @@ channel_lock(struct channel *c)
 
 /*
  * FIXME
+ * very inefficient
  */
 int
 channel_unlock(struct channel *c)
@@ -188,6 +192,39 @@ channel_add(struct channel *c, void *d)
 		//Should never happen?
 		return 1;
 	}
+
+	return 0;
+}
+
+int
+channel_add_2(struct channel *c, void *d)
+{
+	int i, idx, res;
+	struct timespec rmtp;
+	rmtp.tv_sec = 0;
+	rmtp.tv_nsec = 1000;
+
+
+	if (c->siz - 1 >= c->cap) {
+		while (channel_lock(c) != 0) {sleep(1);}
+		if (!channel_resize(c)) return 1;
+		if (channel_unlock(c) != 0) {
+			//c->siz--;
+			//Should never happen?
+			return 1;
+		}
+	}
+
+	//c->data[i] = d;
+	do {
+		idx = c->in_idx;
+		i = idx % c->cap;
+		//nanosleep(&rmtp, NULL);
+		res = atomic_increment(&(c->in_idx), idx, idx + 1);
+		//c->in_idx++;
+	} while (!res);
+	c->siz++;
+	c->data[i] = d;
 
 	return 0;
 }
@@ -234,7 +271,8 @@ par_sum(uint64_t *x, uint64_t n, struct channel *c)
 	for (i = 0; i < n; i++) {
 		sum += x[i];
 	}
-	channel_add(c, (void *) sum);
+	//channel_add(c, (void *) sum);
+	channel_add_2(c, (void *) sum);
 
 	return 0;
 }

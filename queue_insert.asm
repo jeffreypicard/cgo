@@ -1,0 +1,41 @@
+;
+; aquire_blk.asm
+;
+; Assembly function to attempt to aquire a block.
+; 
+; Author: Jeffrey Picard
+;
+
+section .text
+  global atomic_increment
+
+atomic_increment:
+  push  rbp                   ; Save old frame pointer
+  mov   rbp, rsp              ; Establish new frame pointer
+;
+;  push  r12                   ; Save callee saved registers
+;  push  r13
+;  push  r14
+;  push  r15
+; 
+  mov   r10, rdi              ; &size
+  mov   r11, rsi              ; expected_size
+; rdx			      ; new_size
+;
+  mov	rax, r11 ; owner should be NULL or it's owned and this fails
+  lock  cmpxchg [r10], rdx    ; owner = newowner
+  jnz   fail
+  mov   rax, $1
+  jmp   success
+;
+fail:
+  mov   rax, $0
+success:
+;
+;  pop   r15                   ; Return callee saved registers
+;  pop   r14
+;  pop   r13
+;  pop   r12
+;
+  pop rbp                     ; Re-establish old frame pointer
+  ret                         ; Return
